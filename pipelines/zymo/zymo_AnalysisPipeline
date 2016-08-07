@@ -27,7 +27,7 @@ def main(args):
         if alnf is None:
             continue
         commands.append(by_read_command_base.format(read_aln=alnf,
-                                                    read_out="{}_read_accuracy.reads".format(label),
+                                                    read_out=args.outpath + "{}_read_accuracy.reads".format(label),
                                                     label=label,
                                                     degenerate=args.degenerate))
     # run the by-site analysis
@@ -37,17 +37,17 @@ def main(args):
         commands.append(by_site_command_base.format(c=args.C_alns,
                                                     mc=args.mC_alns,
                                                     hmc="-hmC=" + args.hmC_alns if args.hmC_alns is not None else "",
-                                                    site_out="{}_strand_accuracy.sites".format(strand),
+                                                    site_out=args.outpath + "{}_strand_accuracy.sites".format(strand),
                                                     degenerate=args.degenerate,
                                                     strand=strand))
 
     procs = [Popen(x.split(), stdout=sys.stdout, stderr=sys.stderr) for x in commands]
     status = [p.wait() for p in procs]
     # make check for failed jobs
-    os.system("cat *.reads > {out}read_accuracy.tsv".format(out=args.outpath))
-    os.system("cat *.sites > {out}site_accuracy.tsv".format(out=args.outpath))
-    os.system("rm *.sites")
-    os.system("rm *.reads")
+    os.system("cat {out}*.reads > {out}read_accuracy.tsv".format(out=args.outpath))
+    os.system("cat {out}*.sites > {out}site_accuracy.tsv".format(out=args.outpath))
+    #os.system("rm *.sites")
+    #os.system("rm *.reads")
 
 
 if __name__ == "__main__":
