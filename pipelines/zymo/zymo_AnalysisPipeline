@@ -1,0 +1,54 @@
+#!/usr/bin/env python
+import sys
+import os
+from argparse import ArgumentParser
+from subprocess import Popen
+
+
+def parse_args():
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument("-C", action="store", dest="C_alns", required=True)
+    parser.add_argument("-mC", action="store", dest="mC_alns", required=True)
+    parser.add_argument("-hmC", action="store", dest="hmC_alns", required=False, default=None)
+    parser.add_argument("-o", action="store", dest="outpath", required=True)
+    parser.add_argument("-d", action="store", dest="degenerate", required=True)
+    return parser.parse_args()
+
+
+def main(args):
+    args = parse_args()
+    commands = []
+    # run the by-read analysis
+    by_read_command_base = "./zymo_CallMethylation -R={read_aln} -r={read_out} -l={label} -d={degenerate} " \
+                           "-j=reads"
+    alns = [args.C_alns, args.mC_alns, args.hmC_alns]
+    label = ["C", "E", "O"]
+    for alnf, label in zip(alns, label):
+        if alnf is None:
+            continue
+        commands.append(by_read_command_base.format(read_aln=alnf,
+                                                    read_out="{}_read_accuracy.reads".format(label),
+                                                    label=label,
+                                                    degenerate=args.degenerate))
+    # run the by-site analysis
+    by_site_command_base = "./zymo_CallMethylation -C={c} -mC={mc} {hmc} -s={site_out} -d={degenerate} " \
+                           "-j=sites -st={strand}"
+    for strand in ["t", "c"]:
+        commands.append(by_site_command_base.format(c=args.C_alns,
+                                                    mc=args.mC_alns,
+                                                    hmc="-hmC=" + args.hmC_alns if args.hmC_alns is not None else "",
+                                                    site_out="{}_strand_accuracy.sites".format(strand),
+                                                    degenerate=args.degenerate,
+                                                    strand=strand))
+
+    procs = [Popen(x.split(), stdout=sys.stdout, stderr=sys.stderr) for x in commands]
+    status = [p.wait() for p in procs]
+    # make check for failed jobs
+    os.system("cat *.reads > {out}read_accuracy.tsv".format(out=args.outpath))
+    os.system("cat *.sites > {out}site_accuracy.tsv".format(out=args.outpath))
+    os.system("rm *.sites")
+    os.system("rm *.reads")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

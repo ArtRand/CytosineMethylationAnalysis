@@ -1,0 +1,169 @@
+#!/usr/bin/env python
+from __future__ import division, print_function
+import sys
+import pandas as pd
+import numpy as np
+from argparse import ArgumentParser
+from collections import Counter
+
+
+def parse_args():
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument("-C", action="store", dest="C_alns", required=False, default=None)
+    parser.add_argument("-mC", action="store", dest="mC_alns", required=False, default=None)
+    parser.add_argument("-hmC", action="store", dest="hmC_alns", required=False, default=None)
+    parser.add_argument("-R", action="store", dest="read_alns", required=False, default=None)
+    parser.add_argument("-r", action="store", dest="read_outfile", required=False, default=None)
+    parser.add_argument("-s", action="store", dest="site_outfile", required=False, default=None)
+    parser.add_argument("-l", action="store", dest="read_label", required=False, default=None)
+    parser.add_argument("-t", action="store", dest="posterior_threshold", required=False, default=0.0)
+    parser.add_argument("-T", action="store", dest="read_threshold", required=False, default=0.0)
+    parser.add_argument("-d", action="store", dest="degenerate", required=True)
+    parser.add_argument("-j", action="store", dest="job", required=True)
+    parser.add_argument("-st", action="store", dest="strand", required=False, default=None)
+
+    return parser.parse_args()
+
+def parse_vc_alignment_file(filepath):
+    table = pd.read_table(filepath,
+                          usecols=(0, 1, 2, 3, 4, 5, 6),
+                          names=['event_idx', 'ref_pos', 'base', 'prob', 'strand', 'forward', 'read_label'],
+                          dtype={
+                              'event_idx': np.int64,
+                              'ref_pos': np.int64,
+                              'base': np.str,
+                              'prob': np.float64,
+                              'strand': np.str,
+                              'forward': np.str,
+                              'read_label': np.str},
+                          header=None)
+    return table
+
+
+def normalize_probs(probs):
+    total = sum(probs.values())
+    for base in probs:
+        probs[base] /= total
+
+
+def degenerate_probs_map(degenerate):
+    if degenerate == "twoWay":
+        return {'C': 0.0, 'E': 0.0}
+    elif degenerate == "threeWay":
+        return {'C': 0.0, 'E': 0.0, "O": 0.0}
+    else:
+        return {"A": 0.0, "C": 0.0, "G": 0.0, "T": 0.0}
+
+
+def zymo_analysis(read_aln_file, C_alns, mC_alns, hmC_alns, correct_label, degenerate, posterior_match_prob_threshold,
+                  site_strand, read_score_threshold, read_accuracy_outfile, site_accuracy_outfile, sites_or_reads):
+    def read_score(read_df):
+        total_prob = sum(read_df['prob'])
+        return 100 * total_prob / len(read_df['prob'])
+
+    def call_reads(calls_df):
+        # group the calls DataFrame by read
+        for read, read_df in calls_df.groupby('read_label'):
+            # call each site for that read
+            score = read_score(read_df=read_df)
+            if score < read_score_threshold:
+                continue
+            site_calls = {}
+            for site, probs in call_sites(read_df):
+                site_calls[site] = max(probs, key=probs.get)
+            # read: read_label, site_calls {site: call}, score
+            yield read, site_calls, score
+
+    def call_sites(calls_df):
+        # group the aligned pairs by the reference position they are reporting on
+        for site, site_df in calls_df.groupby('ref_pos'):
+            # probs is a map base : probabilty
+            probs = degenerate_probs_map(degenerate=degenerate)
+            # only take pairs above a threshold posterior probability
+            thresholded_df = site_df.ix[site_df['prob'] >= posterior_match_prob_threshold]
+            if thresholded_df.empty:
+                print("skipping", site, file=sys.stderr)
+                continue
+            for _, row in thresholded_df.iterrows():
+                posterior_prob = row['prob']
+                called_base = row['base']
+                if posterior_prob < posterior_match_prob_threshold:
+                    print("Error sorting by posterior probs")
+                    sys.exit(1)
+                probs[called_base] += posterior_prob
+            normalize_probs(probs=probs)
+            yield site, probs
+
+    def read_accuracy():
+        if read_aln_file is None:
+            print("Error: need read alignment file for by-read analysis", file=sys.stderr)
+            sys.exit(1)
+        fH = open(read_accuracy_outfile, "w")
+        aln = parse_vc_alignment_file(read_aln_file)
+        for strand in strands:
+            by_strand = aln.ix[aln['strand'] == strand]
+            for read, site_calls, score in call_reads(by_strand):
+                correct = site_calls.values().count(correct_label)
+                total = len(site_calls)
+                accuracy = correct / total
+                print("{accuracy}\t{score}\t{strand}\t{read_label}\t{correct_label}"
+                      "".format(accuracy=accuracy, read_label=read, score=score, strand=strand,
+                                correct_label=correct_label), file=fH)
+        fH.close()
+
+    def site_accuracy():
+        if degenerate == "threeWay" and hmC_alns is None:
+            print("Three way classification requires hmC alignment results", file=sys.stderr)
+            sys.exit(1)
+        fH = open(site_accuracy_outfile, "w")
+
+        alignments = [C_alns, mC_alns, hmC_alns]
+        labels = ["C", "E", "O"]
+        correct_site_counts = Counter()
+        incorrect_site_counts = Counter()
+        for alnf, label in zip(alignments, labels):
+            if alnf is None:
+                continue
+            aln = parse_vc_alignment_file(alnf)
+            by_strand = aln.ix[aln['strand'] == site_strand]
+            for _, site_calls, _ in call_reads(by_strand):
+                for site in site_calls:
+                    called_base = site_calls[site]
+                    if called_base == label:
+                        correct_site_counts[site] += 1
+                    else:
+                        incorrect_site_counts[site] += 1
+        all_sites = set(correct_site_counts.keys() + incorrect_site_counts.keys())
+        for site in all_sites:
+            try:
+                accuracy = correct_site_counts[site] / (correct_site_counts[site] + incorrect_site_counts[site])
+            except KeyError:
+                accuracy = 0.0
+            print("{accuracy}\t{site}\t{strand}\n".format(accuracy=accuracy, site=site, strand=site_strand),
+                  file=fH)
+        fH.close()
+        return
+
+    strands = ["t", "c"]
+    if sites_or_reads == "sites":
+        if C_alns is None or mC_alns is None:
+            print("Need to provide C and mC alns for Site analysis")
+            sys.exit(1)
+        if site_accuracy_outfile is None or site_strand is None:
+            print("Need to provide Site outfile and strand to analyze")
+            sys.exit(1)
+        site_accuracy()
+    else:
+        read_accuracy()
+    return
+
+
+def main(args):
+    args = parse_args()
+    zymo_analysis(read_aln_file=args.read_alns, C_alns=args.C_alns, mC_alns=args.mC_alns, hmC_alns=args.hmC_alns,
+                  correct_label=args.read_label, degenerate=args.degenerate, read_score_threshold=args.read_threshold,
+                  posterior_match_prob_threshold=args.posterior_threshold, read_accuracy_outfile=args.read_outfile,
+                  site_accuracy_outfile=args.site_outfile, sites_or_reads=args.job, site_strand=args.strand)
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
